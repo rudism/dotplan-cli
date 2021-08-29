@@ -31,7 +31,7 @@ Configure your email and password in `~/.dotplan.conf.json`. Make sure this file
 }
 ```
 
-- `dotplan register` will register a new account using the email and password in your `~/.dotplan.conf.json` file
+- `dotplan register` will prompt for an email address and password and attempt to register it for you, optionally saving it to your `~/.dotplan.conf.json` file
 - `dotplan publish` will sign (if `minisign` is available) and publish your `~/.plan` file to your dotplan provider
 - `dotplan edit` will open your `~/.plan` file in an editor, then sign (if `minisign` is available) and publish it to your dotplan provider after you save and exit
 
@@ -49,3 +49,14 @@ If you set `auth.provider` in your `~/.dotplan.conf.json` file, the `register`, 
   "relayProvider": "https://dotplan.online"
 }
 ```
+
+Several other aspects can be configured via environment variables:
+
+- `DOTPLAN_CONFIG_PATH`: the config file to read and write (`$HOME/.dotplan.conf.json`)
+- `DOTPLAN_MINISIGN_PRIVATE_KEY` the location of your private key (`$HOME/.minisign/minisign.key`)
+- `DOTPLAN_PLAN_PATH` the location of your plan for the `publish` and `edit` commands (`$HOME/.plan`)
+- `DOTPLAN_PLAN_SIG_PATH` where to save the signature for the `publish` and `edit` commands (`$HOME/.plan.minisig`)
+- `DOTPLAN_CURL_PATH` to specify the location of `curl`
+- `DOTPLAN_JQ_PATH` to specify the location of `jq`
+- `DOTPLAN_DRILL_PATH` to specify the location of `drill` or `dig`
+- `DOTPLAN_MINISIGN_PATH` to specify the location of `minisign`

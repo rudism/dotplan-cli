@@ -155,8 +155,13 @@ register() (
   write_config=$(read_char)
   echo "$write_config"
   if [ "$write_config" = "y" ] || [ "$write_config" = "Y" ]; then
-    new_config=$($jq --arg email "$register_email" --arg password "$register_password" '.auth.email=$email | .auth.password=$password' < "$config_path")
+    if [ -r "$config_path" ]; then
+      new_config=$($jq --arg email "$register_email" --arg password "$register_password" '.auth.email=$email | .auth.password=$password' < "$config_path")
+    else
+      new_config=$($jq -n --arg email "$register_email" --arg password "$register_password" '{"auth":{"email":$email,"password":$password}}')
+    fi
     echo "$new_config" > "$config_path"
+    chmod 0600 "$config_path"
   fi
 )
 
