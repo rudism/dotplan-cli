@@ -1,0 +1,253 @@
+#!/bin/sh
+
+# CLI for dotplan.online and compatible services.
+# Prereqs:
+#   - jq, curl, drill or dig
+#   - minisign (optional)
+
+# Configure via ~/.dotplan.conf.json:
+# {
+#   "auth": {
+#     "email": "user@example.com",
+#     "password": "my-password-123",
+#     "provider": "https://dotplan.online"
+#   },
+#   "relayProvider": "https://dotplan.online"
+# }
+
+version="v0.9.1"
+config_path=${DOTPLAN_CONFIG_PATH:-"$HOME/.dotplan.conf.json"}
+minisign_private_key=${DOTPLAN_MINISIGN_PRIVATE_KEY:-"$HOME/.minisign/minisign.key"}
+plan_path=${DOTPLAN_PLAN_PATH:-"$HOME/.plan"}
+plan_sig_path=${DOTPLAN_PLAN_SIG_PATH:-"$HOME/.plan.minisig"}
+
+usage() {
+  echo "dotplan.online CLI $version"
+  echo "Usage:"
+  echo "  dotplan help             - print help and exit"
+  echo "  dotplan [email]          - fetch plan"
+  echo "  dotplan [email] [pubkey] - fetch and verify plan"
+  echo "  dotplan register         - register new account"
+  echo "  dotplan publish          - publish plan"
+  echo "  dotplan edit             - edit and publish plan"
+}
+
+url_encode() (
+  # https://gist.github.com/1480c1/455c0ec47cd5fd0514231ba865f0fca0
+  LANG=C
+  string=${*:-$(
+    cat -
+    printf x
+  )}
+  [ -n "$*" ] || string=${string%x}
+  # Zero index, + 1 to start from 1 since sed starts from 1
+  lines=$(($(printf %s "$string" | wc -l) + 1))
+  lineno=1
+  while [ $lineno -le $lines ]; do
+    currline=$(printf %s "$string" | sed "${lineno}q;d")
+    pos=1
+    chars=$(printf %s "$currline" | wc -c)
+    while [ $pos -le "$chars" ]; do
+      c=$(printf %s "$currline" | cut -b$pos)
+      case $c in
+        [-_.~a-zA-Z0-9]) printf %c "$c" ;;
+        *) printf %%%02X "'${c:-\n}'" ;;
+      esac
+      pos=$((pos + 1))
+    done
+    [ $lineno -eq $lines ] || printf %%0A
+    lineno=$((lineno + 1))
+  done
+)
+
+read_char() (
+  stty -icanon -echo
+  user_char=
+  eval "user_char=\$(dd bs=1 count=1 2>/dev/null)"
+  stty icanon echo
+  echo "$user_char"
+)
+
+validate_email() (
+  # validate {user}@{domain}.{tld} format
+  good_email=0
+  check_email=$1
+  # make sure there's something before the @
+  if [ "${check_email%@*}" = "$check_email" ]; then good_email=1; fi
+  # make sure there isn't a second @
+  after_at=${check_email#*@}
+  if [ -z "${after_at##*@*}" ]; then good_email=1; fi
+  # make sure there's a tld of some sort
+  if [ -z "${after_at#*.}" ] || [ "${after_at#*.}" = "$after_at" ]; then
+    good_email=1
+  fi
+  if [ "$good_email" -eq 1 ]; then
+    echo "email must be of the form {user}@{domain}.{tld}"
+  fi
+  exit $good_email
+)
+
+check_curl_resp() {
+  curl_resp=$1
+  check_key=$2
+  check_var=$3
+  curl_error=$(echo "$curl_resp" | $jq -r '.error // empty')
+  if [ -n "$curl_error" ]; then
+    echo "error from server: $curl_error"
+    return 1
+  fi
+  check_val=$(echo "$curl_resp" | $jq -r "$check_key // empty")
+  if [ -z "$check_val" ]; then
+    echo "unexpected response from server"
+    echo "$curl_resp"
+    return 1
+  fi
+  if [ -n "$check_var" ]; then
+    eval "$check_var"'=$check_val'
+  fi
+}
+
+register() (
+  printf "Email address: "
+  read -r register_email
+  if ! validate_email "$register_email"; then exit 1; fi
+  stty -echo
+  printf "Password (input hidden): "
+  read -r register_password
+  printf "\n"
+  printf "Confirm password (input hidden): "
+  read -r register_password_confirm
+  stty echo
+  printf "\n"
+  if [ "$register_password" != "$register_password_confirm" ]; then
+    echo "passwords did not match"
+    exit 1
+  fi
+  curl_url="$auth_provider/users/$(url_encode "$register_email")"
+  curl_data=$($jq -cn --arg password "$register_password" '{"password":$password}')
+  curl_resp=$($curl -s -H 'Content-type: application/json' -H 'Accept: application/json' -XPOST -d "$curl_data" "$curl_url")
+  curl_email=
+  if ! check_curl_resp "$curl_resp" ".email" curl_email; then exit 1; fi
+  # emails come from dotplan.online, which will always go to spam
+  echo "$curl_email registered, check your spam to verify"
+  printf "Write auth to %s, Y or N? [N]: " "$config_path"
+  write_config=$(read_char)
+  echo "$write_config"
+  if [ "$write_config" = "y" ] || [ "$write_config" = "Y" ]; then
+    new_config=$($jq --arg email "$register_email" --arg password "$register_password" '.auth.email=$email | .auth.password=$password' < "$config_path")
+    echo "$new_config" > "$config_path"
+  fi
+)
+
+publish() (
+  token=
+  curl_resp=$($curl -s -H 'Accept: application/json' -u "$auth_email:$auth_password" "$auth_provider/token")
+  if ! check_curl_resp "$curl_resp" ".token" token; then exit 1; fi
+  plan_content=$(cat "$plan_path")
+  curl_data=$(jq -n --arg token "$token" --arg plan "$plan_content" '{"plan":$plan,"auth":$token}')
+  if [ -n "$minisign" ]; then
+    echo "signing plan with key $minisign_private_key"
+    if ! $minisign -S -q -s "$minisign_private_key" -x "$plan_sig_path" -m "$plan_path"; then
+      echo 'minisign command failed'
+      exit 1
+    fi
+    plan_sig_content=$(cat "$plan_sig_path")
+    curl_data=$(echo "$curl_data" | jq --arg signature "$plan_sig_content" '.signature=$signature')
+  fi
+  curl_url="$auth_provider/plan/$(url_encode "$auth_email")"
+  curl_resp=$(curl -s -H 'Content-type: application/json' -XPUT -d "$curl_data" "$curl_url")
+  if ! check_curl_resp "$curl_resp" ".success"; then
+    exit 1
+  else
+    echo "plan published"
+  fi
+)
+
+edit() (
+  editor=${EDITOR:-"vi"}
+  if [ -f "$plan_path" ]; then
+    plan_mtime=$(stat -c "%Y" "$plan_path")
+  else
+    plan_mtime=0
+  fi
+  "$editor" "$plan_path"
+  if [ -f "$plan_path" ]; then
+    plan_new_mtime=$(stat -c "%Y" "$plan_path")
+  else
+    plan_new_mtime=-1
+  fi
+  if [ "$plan_new_mtime" -gt "$plan_mtime" ]; then
+    publish
+    return $?
+  else
+    echo "$plan_path not modified, skipping publish"
+  fi
+)
+
+curl=${DOTPLAN_CURL_PATH:-$(command -v curl)}
+jq=${DOTPLAN_JQ_PATH:-$(command -v jq)}
+drill=${DOTPLAN_DRILL_PATH:-$(command -v drill || command -v dig)}
+minisign=${DOTPLAN_MINISIGN_PATH:-$(command -v minisign)}
+
+if [ -z "$curl" ]; then echo "curl command not found"; exit 1; fi
+if [ -z "$jq" ]; then echo "jq command not found"; exit 1; fi
+if [ -z "$drill" ]; then echo "drill command not found"; exit 1; fi
+if [ -z "$minisign" ]; then
+  echo "minisign command not found"
+  echo "signature functionality disabled"
+elif [ ! -r "$minisign_private_key" ]; then
+  echo "minisign private key $minisign_private_key not found"
+  echo "signature functionality disabled"
+  minisign=
+fi
+
+if [ -r "$config_path" ]; then
+  auth_email=$($jq -r ".auth.email // empty" "$config_path")
+  auth_password=$($jq -r ".auth.password // empty" "$config_path")
+  auth_provider=$($jq -r ".auth.provider // empty" "$config_path")
+  relay_provider=$($jq -r ".relayProvider // empty" "$config_path")
+else
+  echo "$config_path file not found, using defaults"
+fi
+
+if [ -z "$auth_provider" ]; then auth_provider='https://dotplan.online'; fi
+
+if [ $# -gt 3 ] || [ $# -eq 0 ] || [ "$1" = "help" ]; then
+  usage
+  exit
+fi
+
+cmd_arg1=$1
+cmd_arg2=$2
+cmd_arg3=$3
+
+if [ "$cmd_arg1" = "register" ]; then
+  if [ $# -gt 1 ]; then usage; exit 1; fi
+  register
+  exit $?
+
+elif [ "$cmd_arg1" = "publish" ]; then
+  if [ $# -gt 1 ]; then usage; exit 1; fi
+  if [ -z "$auth_email" ] || [ -z "$auth_password" ]; then
+    echo "auth config missing in $config_path"
+    exit 1
+  fi
+  if [ ! -r "$plan_path" ]; then
+    echo "$plan_path does not exist or cannot be read"
+    exit 1
+  fi
+  publish
+  exit $?
+
+elif [ "$cmd_arg1" = "edit" ]; then
+  if [ $# -gt 1 ]; then usage; exit 1; fi
+  if [ -e "$plan_path" ] && [ ! -w "$plan_path" ]; then
+    echo "$plan_path exists but is not writeable"
+    exit 1
+  fi
+  edit
+  exit $?
+
+else
+  echo 'fetching plan'
+fi
