@@ -32,6 +32,10 @@ usage() {
   echo "  dotplan edit             - edit and publish plan"
 }
 
+error() (
+  echo "$1" >&2
+)
+
 url_encode() (
   # https://gist.github.com/1480c1/455c0ec47cd5fd0514231ba865f0fca0
   LANG=C
@@ -82,7 +86,7 @@ validate_email() (
     good_email=1
   fi
   if [ "$good_email" -eq 1 ]; then
-    echo "email must be of the form {user}@{domain}.{tld}"
+    error "email must be of the form {user}@{domain}.{tld}"
   fi
   exit $good_email
 )
@@ -93,19 +97,35 @@ check_curl_resp() {
   check_var=$3
   curl_error=$(echo "$curl_resp" | $jq -r '.error // empty')
   if [ -n "$curl_error" ]; then
-    echo "error from server: $curl_error"
+    error "error from server: $curl_error"
     return 1
   fi
   check_val=$(echo "$curl_resp" | $jq -r "$check_key // empty")
   if [ -z "$check_val" ]; then
-    echo "unexpected response from server"
-    echo "$curl_resp"
+    error "unexpected response from server"
+    error "$curl_resp"
     return 1
   fi
   if [ -n "$check_var" ]; then
     eval "$check_var"'=$check_val'
   fi
 }
+
+get_dotplan_provider() (
+  email=$1
+  default_provider=$2
+  domain="${email#*@}"
+  provider="$default_provider"
+  if [ -z "$provider" ]; then
+    if ! srv=$($drill srv "_dotplan._tcp.$domain" | grep SRV | awk '{if(NF > 0 && substr($1,1,1) != ";") print $NF}'); then srv=; fi
+    if [ -z "$srv" ]; then
+      provider="https://dotplan.online"
+    else
+      provider="https://${srv%*.}"
+    fi
+  fi
+  echo "$provider"
+)
 
 register() (
   printf "Email address: "
@@ -120,10 +140,11 @@ register() (
   stty echo
   printf "\n"
   if [ "$register_password" != "$register_password_confirm" ]; then
-    echo "passwords did not match"
+    error "passwords did not match"
     exit 1
   fi
-  curl_url="$auth_provider/users/$(url_encode "$register_email")"
+  register_provider=$(get_dotplan_provider "$register_email" "$auth_provider")
+  curl_url="$register_provider/users/$(url_encode "$register_email")"
   curl_data=$($jq -cn --arg password "$register_password" '{"password":$password}')
   curl_resp=$($curl -s -H 'Content-type: application/json' -H 'Accept: application/json' -XPOST -d "$curl_data" "$curl_url")
   curl_email=
@@ -141,20 +162,21 @@ register() (
 
 publish() (
   token=
-  curl_resp=$($curl -s -H 'Accept: application/json' -u "$auth_email:$auth_password" "$auth_provider/token")
+  publish_provider=$(get_dotplan_provider "$auth_email" "$auth_provider")
+  curl_resp=$($curl -s -H 'Accept: application/json' -u "$auth_email:$auth_password" "$publish_provider/token")
   if ! check_curl_resp "$curl_resp" ".token" token; then exit 1; fi
   plan_content=$(cat "$plan_path")
   curl_data=$(jq -n --arg token "$token" --arg plan "$plan_content" '{"plan":$plan,"auth":$token}')
   if [ -n "$minisign" ]; then
     echo "signing plan with key $minisign_private_key"
     if ! $minisign -S -q -s "$minisign_private_key" -x "$plan_sig_path" -m "$plan_path"; then
-      echo 'minisign command failed'
+      error 'minisign command failed'
       exit 1
     fi
     plan_sig_content=$(cat "$plan_sig_path")
     curl_data=$(echo "$curl_data" | jq --arg signature "$plan_sig_content" '.signature=$signature')
   fi
-  curl_url="$auth_provider/plan/$(url_encode "$auth_email")"
+  curl_url="$publish_provider/plan/$(url_encode "$auth_email")"
   curl_resp=$(curl -s -H 'Content-type: application/json' -XPUT -d "$curl_data" "$curl_url")
   if ! check_curl_resp "$curl_resp" ".success"; then
     exit 1
@@ -180,8 +202,41 @@ edit() (
     publish
     return $?
   else
-    echo "$plan_path not modified, skipping publish"
+    error "$plan_path not modified, skipping publish"
   fi
+)
+
+fetch() (
+  fetch_email=$1
+  fetch_pubkey=$2
+  if [ -n "$fetch_pubkey" ] && [ -z "$minisign" ]; then
+    error "can't verify signatures, minisign command not found"
+    exit 1
+  fi
+  fetch_provider=$(get_dotplan_provider "$fetch_email" "$relay_provider")
+  curl_url="$fetch_provider/plan/$(url_encode "$fetch_email")"
+  curl_resp=$($curl -s -H 'Accept: application/json' "$curl_url");
+  plan_content=
+  if ! check_curl_resp "$curl_resp" ".plan" plan_content; then exit 1; fi
+  if [ -n "$fetch_pubkey" ]; then
+    sig_content=$(echo "$curl_resp" | $jq -r '.signature // empty')
+    if [ -z "$sig_content" ]; then
+      error "plan is not signed"
+      exit 1
+    fi
+    temp_plan_file=$(echo 'mkstemp(template)' | m4 -D template="${TMPDIR:-"/tmp"}/dotplanXXXXXX")
+    temp_sig_file="$temp_plan_file.minisig"
+    printf "%s" "$plan_content" > "$temp_plan_file"
+    printf "%s" "$sig_content" > "$temp_sig_file"
+    minisign -q -Vm "$temp_plan_file" -x "$temp_sig_file" -P "$fetch_pubkey"
+    verify_success=$?
+    rm "$temp_plan_file" "$temp_sig_file"
+    if [ "$verify_success" -ne 0 ]; then
+      error "signature verification failed"
+      exit 1
+    fi
+  fi
+  echo "$plan_content"
 )
 
 curl=${DOTPLAN_CURL_PATH:-$(command -v curl)}
@@ -212,21 +267,19 @@ fi
 
 if [ -z "$auth_provider" ]; then auth_provider='https://dotplan.online'; fi
 
-if [ $# -gt 3 ] || [ $# -eq 0 ] || [ "$1" = "help" ]; then
+if [ $# -gt 2 ] || [ $# -eq 0 ] || [ "$1" = "help" ]; then
   usage
   exit
 fi
 
-cmd_arg1=$1
-cmd_arg2=$2
-cmd_arg3=$3
+cmd=$1
 
-if [ "$cmd_arg1" = "register" ]; then
+if [ "$cmd" = "register" ]; then
   if [ $# -gt 1 ]; then usage; exit 1; fi
   register
   exit $?
 
-elif [ "$cmd_arg1" = "publish" ]; then
+elif [ "$cmd" = "publish" ]; then
   if [ $# -gt 1 ]; then usage; exit 1; fi
   if [ -z "$auth_email" ] || [ -z "$auth_password" ]; then
     echo "auth config missing in $config_path"
@@ -239,7 +292,7 @@ elif [ "$cmd_arg1" = "publish" ]; then
   publish
   exit $?
 
-elif [ "$cmd_arg1" = "edit" ]; then
+elif [ "$cmd" = "edit" ]; then
   if [ $# -gt 1 ]; then usage; exit 1; fi
   if [ -e "$plan_path" ] && [ ! -w "$plan_path" ]; then
     echo "$plan_path exists but is not writeable"
@@ -249,5 +302,6 @@ elif [ "$cmd_arg1" = "edit" ]; then
   exit $?
 
 else
-  echo 'fetching plan'
+  fetch "$1" "$2"
+  exit $?
 fi
