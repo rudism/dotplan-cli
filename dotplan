@@ -215,7 +215,7 @@ fetch() (
   fi
   fetch_provider=$(get_dotplan_provider "$fetch_email" "$relay_provider")
   curl_url="$fetch_provider/plan/$(url_encode "$fetch_email")"
-  curl_resp=$($curl -s -H 'Accept: application/json' "$curl_url");
+  curl_resp=$($curl -s -L -H 'Accept: application/json' "$curl_url");
   plan_content=
   if ! check_curl_resp "$curl_resp" ".plan" plan_content; then exit 1; fi
   if [ -n "$fetch_pubkey" ]; then
