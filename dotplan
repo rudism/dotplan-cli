@@ -15,11 +15,10 @@
 #   "relayProvider": "https://dotplan.online"
 # }
 
-version="v0.9.1"
+version="v0.9.2"
 config_path=${DOTPLAN_CONFIG_PATH:-"$HOME/.dotplan.conf.json"}
 minisign_private_key=${DOTPLAN_MINISIGN_PRIVATE_KEY:-"$HOME/.minisign/minisign.key"}
 plan_path=${DOTPLAN_PLAN_PATH:-"$HOME/.plan"}
-plan_sig_path=${DOTPLAN_PLAN_SIG_PATH:-"$HOME/.plan.minisig"}
 
 usage() {
   echo "dotplan.online CLI $version"
@@ -90,6 +89,10 @@ validate_email() (
   fi
   exit $good_email
 )
+
+make_temp_file() {
+  echo 'mkstemp(template)' | m4 -D template="${TMPDIR:-"/tmp"}/dotplanXXXXXX"
+}
 
 check_curl_resp() {
   curl_resp=$1
@@ -174,11 +177,19 @@ publish() (
   curl_data=$(jq -n --arg token "$token" --arg plan "$plan_content" '{"plan":$plan,"auth":$token}')
   if [ -n "$minisign" ]; then
     echo "signing plan with key $minisign_private_key"
-    if ! $minisign -S -q -s "$minisign_private_key" -x "$plan_sig_path" -m "$plan_path"; then
+    plan_temp_file=$(make_temp_file)
+    plan_sig_temp_file=$(make_temp_file)
+    # this normalizes the content with the json,
+    # removing trailing newline if it exists
+    printf "%s" "$plan_content" > "$plan_temp_file"
+    $minisign -S -q -s "$minisign_private_key" -x "$plan_sig_temp_file" -m "$plan_temp_file"
+    minisign_success=$?
+    plan_sig_content=$(cat "$plan_sig_temp_file")
+    rm "$plan_temp_file" "$plan_sig_temp_file"
+    if [ "$minisign_success" -ne 0 ]; then
       error 'minisign command failed'
       exit 1
     fi
-    plan_sig_content=$(cat "$plan_sig_path")
     curl_data=$(echo "$curl_data" | jq --arg signature "$plan_sig_content" '.signature=$signature')
   fi
   curl_url="$publish_provider/plan/$(url_encode "$auth_email")"
@@ -229,8 +240,8 @@ fetch() (
       error "plan is not signed"
       exit 1
     fi
-    temp_plan_file=$(echo 'mkstemp(template)' | m4 -D template="${TMPDIR:-"/tmp"}/dotplanXXXXXX")
-    temp_sig_file="$temp_plan_file.minisig"
+    temp_plan_file=$(make_temp_file)
+    temp_sig_file=$(make_temp_file)
     printf "%s" "$plan_content" > "$temp_plan_file"
     printf "%s" "$sig_content" > "$temp_sig_file"
     minisign -q -Vm "$temp_plan_file" -x "$temp_sig_file" -P "$fetch_pubkey"

@@ -55,7 +55,6 @@ Several other aspects can be configured via environment variables:
 - `DOTPLAN_CONFIG_PATH`: the config file to read and write (`$HOME/.dotplan.conf.json`)
 - `DOTPLAN_MINISIGN_PRIVATE_KEY` the location of your private key (`$HOME/.minisign/minisign.key`)
 - `DOTPLAN_PLAN_PATH` the location of your plan for the `publish` and `edit` commands (`$HOME/.plan`)
-- `DOTPLAN_PLAN_SIG_PATH` where to save the signature for the `publish` and `edit` commands (`$HOME/.plan.minisig`)
 - `DOTPLAN_CURL_PATH` to specify the location of `curl`
 - `DOTPLAN_JQ_PATH` to specify the location of `jq`
 - `DOTPLAN_DRILL_PATH` to specify the location of `drill` or `dig`
