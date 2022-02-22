@@ -1,3 +1,5 @@
+**Note:** Active development has moved to https://code.sitosis.com/rudism/dotplan-cli
+
 # Dotplan CLI
 
 A shell script to interact with [dotplan](https://github.com/rudism/dotplan-online) providers.
